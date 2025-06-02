@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateUserDto } from '../users/dto';
@@ -6,6 +6,7 @@ import * as bcrypt from "bcrypt";
 import { User } from '../../generated/prisma';
 import { Response } from 'express';
 import { SignInUserDto } from '../users/dto/sign-in.user.dto';
+import { JWTPayload, Tokens } from '../common/types';
 
 
 @Injectable()
@@ -15,11 +16,11 @@ export class AuthService {
     private readonly prismaService: PrismaService
   ) {}
 
-  async generateTokenforUser(user: User) {
-    const payload = {
+  async generateTokenforUser(user: User): Promise<Tokens>{
+    const payload: JWTPayload = {
       id: user.id,
       is_active: user.is_active,
-      email: user.email,
+      email: user.email
     };
     const [accessToken, refreshToken] = await Promise.all([
       this.jwtService.signAsync(payload, {
@@ -50,7 +51,7 @@ export class AuthService {
     const user = await this.prismaService.user.create({
       data: { ...otherDto, hashed_password },
     });
-    const tokens = await this.generateTokenforUser(user);
+    const tokens:Tokens = await this.generateTokenforUser(user);
     const hashed_refresh_token = await bcrypt.hash(tokens.refreshToken, 7);
     await this.updateRefreshToken(user.id, hashed_refresh_token);
     res.cookie("refreshToken", tokens.refreshToken, {
@@ -60,6 +61,7 @@ export class AuthService {
     return {
       message: `New User Signed-up`,
       accessToken: tokens.accessToken,
+      id:user.id
     };
   }
 
@@ -98,6 +100,43 @@ export class AuthService {
       where: { id: user.id },
       data: { hashed_refresh_token },
     });
-    return { message: "Tizimga xush kelibsiz", accessToken };
+    return { message: "Tizimga xush kelibsiz", id: user.id, accessToken };
   }
+
+  async refreshToken(userId:number,refreshToken:string,res:Response){
+    const user = await this.prismaService.user.findUnique({where:{id:userId}})
+    if(!user || !user.hashed_refresh_token){
+      throw new ForbiddenException("Access Denied")
+    }
+    const rtMatches = await bcrypt.compare(refreshToken,user.hashed_refresh_token)
+    if(!rtMatches){
+      throw new ForbiddenException("Access Denied")
+    }
+    const tokens: Tokens = await this.generateTokenforUser(user)
+    const hashed_refresh_token = await bcrypt.hash(tokens.refreshToken,7)
+    await this.updateRefreshToken(user.id,hashed_refresh_token)
+    res.cookie("refreshToken", tokens.refreshToken,{
+      maxAge: +process.env.COOKIE_TIME!,
+      httpOnly:true
+    })
+    return {
+      message:"Tokens are updated",
+      id:user.id,
+      accessToken:tokens.accessToken
+    }
+  }
+
+  async signOut(userId:number,res:  Response){
+  const user = await this.prismaService.user.findUnique({where:{id:userId}})
+  if(!user || !user.hashed_refresh_token){
+    throw new ForbiddenException("Access Denied")
+  }
+  res.clearCookie("refreshToken");
+  await this.prismaService.user.update({
+    where:{id:userId},
+    data:{hashed_refresh_token:null}
+  })
+    return {message:"User signed out successfully"}
+  }
+
 }
